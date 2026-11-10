@@ -40,7 +40,8 @@ services:
     image: 'localstack/localstack:4.4.0'
     ports:
       - '4566:4566'
-      - '4510-4559:4510-4559'
+    labels:
+      org.springframework.boot.readiness-check.tcp.disable: 'true'
     environment:
       - SERVICES=s3
       - DEBUG=${DEBUG:-0}
