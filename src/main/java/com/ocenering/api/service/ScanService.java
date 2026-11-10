@@ -55,6 +55,11 @@ public class ScanService {
     public record TreeStats(int scanCount, OffsetDateTime firstScanDate, OffsetDateTime lastScanDate) {
     }
 
+    @FunctionalInterface
+    public interface UploadProgressListener {
+        void onProgress(String phase, String message, double fraction, long writtenBytes, long totalBytes);
+    }
+
     private record StoredScan(Scan scan, String location) {
     }
 
@@ -100,6 +105,16 @@ public class ScanService {
     /** Streams the scan's raw file to S3, then commits its row. The file is removed if the commit fails. */
     public Scan upload(UUID treeId, String name, OffsetDateTime scanDate, String notes,
                        String originalFileName, long size, InputStream content, AuthenticatedUser me) {
+        return upload(treeId, name, scanDate, notes, originalFileName, size, content, me, null);
+    }
+
+    public Scan upload(UUID treeId, String name, OffsetDateTime scanDate, String notes,
+                       String originalFileName, long size, InputStream content, AuthenticatedUser me,
+                       UploadProgressListener listener) {
+        if (listener != null) {
+            listener.onProgress("processing", "Processing scan in Java…", 0.05, 0, size);
+        }
+
         Table table = scanCatalog.table();
         UUID scanId = UUID.randomUUID();
         String fileName = sanitizeFileName(originalFileName);
@@ -108,11 +123,15 @@ public class ScanService {
         long written;
 
         try {
-            written = writeObject(table, location, content);
+            written = writeObject(table, location, content, size, listener);
         } catch (IOException | RuntimeException e) {
             deleteQuietly(table, location);
 
             throw new ScanStorageException("Uploading the scan file to S3 failed: " + e.getMessage(), e);
+        }
+
+        if (listener != null) {
+            listener.onProgress("iceberg_commit", "Committing metadata to Apache Iceberg…", 0.95, written, written);
         }
 
         Scan scan = new Scan(scanId, treeId, name, scanDate.withOffsetSameInstant(ZoneOffset.UTC), fileName,
@@ -125,6 +144,10 @@ public class ScanService {
             deleteQuietly(table, location);
 
             throw new ScanStorageException("Committing the scan to Iceberg failed: " + e.getMessage(), e);
+        }
+
+        if (listener != null) {
+            listener.onProgress("complete", "Upload complete!", 1.0, written, written);
         }
 
         return scan;
@@ -187,11 +210,33 @@ public class ScanService {
         return out;
     }
 
-    private static long writeObject(Table table, String location, InputStream content) throws IOException {
+    private static long writeObject(Table table, String location, InputStream content, long expectedSize,
+                                    UploadProgressListener listener) throws IOException {
         OutputFile out = table.io().newOutputFile(location);
 
         try (InputStream in = content; PositionOutputStream os = out.createOrOverwrite()) {
-            in.transferTo(os);
+            byte[] buffer = new byte[4 * 1024 * 1024];
+            long total = 0;
+            long lastReport = System.currentTimeMillis();
+            int read;
+
+            while ((read = in.read(buffer)) >= 0) {
+                os.write(buffer, 0, read);
+                total += read;
+
+                long now = System.currentTimeMillis();
+
+                if (listener != null && now - lastReport >= 250) {
+                    double fraction = expectedSize > 0 ? (double) total / expectedSize : 0;
+                    listener.onProgress("s3_upload", "Uploading from Java to S3 storage…",
+                            Math.min(0.92, 0.05 + fraction * 0.87), total, expectedSize);
+                    lastReport = now;
+                }
+            }
+
+            if (listener != null) {
+                listener.onProgress("s3_upload", "Finalizing S3 upload…", 0.92, total, expectedSize);
+            }
 
             return os.getPos();
         }

@@ -1,18 +1,24 @@
 package com.ocenering.api.controller.v1;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ocenering.api.auth.AuditService;
 import com.ocenering.api.auth.AuthenticatedUser;
 import com.ocenering.api.service.ScanService;
 import com.ocenering.api.service.ScanTreeService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -45,10 +51,13 @@ public class ScanTreeController {
 
     private final AuditService audit;
 
-    public ScanTreeController(ScanTreeService trees, ScanService scans, AuditService audit) {
+    private final ObjectMapper json;
+
+    public ScanTreeController(ScanTreeService trees, ScanService scans, AuditService audit, ObjectMapper json) {
         this.trees = trees;
         this.scans = scans;
         this.audit = audit;
+        this.json = json;
     }
 
     @GetMapping
@@ -97,13 +106,14 @@ public class ScanTreeController {
 
     /** Multipart upload: the point-cloud file plus the date the scan was taken. */
     @PostMapping(path = "/{id}/scans", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<ScanService.Scan> upload(@PathVariable UUID id,
-                                                   @RequestParam("file") MultipartFile file,
-                                                   @RequestParam("scanDate") String scanDate,
-                                                   @RequestParam(value = "name", required = false) String name,
-                                                   @RequestParam(value = "notes", required = false) String notes,
-                                                   @AuthenticationPrincipal AuthenticatedUser me,
-                                                   HttpServletRequest http) throws IOException {
+    public ResponseEntity<?> upload(@PathVariable UUID id,
+                                    @RequestParam("file") MultipartFile file,
+                                    @RequestParam("scanDate") String scanDate,
+                                    @RequestParam(value = "name", required = false) String name,
+                                    @RequestParam(value = "notes", required = false) String notes,
+                                    @AuthenticationPrincipal AuthenticatedUser me,
+                                    HttpServletRequest http,
+                                    HttpServletResponse response) throws IOException {
         requireTree(id);
 
         if (file.isEmpty()) {
@@ -119,6 +129,54 @@ public class ScanTreeController {
 
         if (displayName.length() > 200 || (notes != null && notes.length() > 2000)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Name or notes are too long");
+        }
+
+        String accept = http.getHeader(HttpHeaders.ACCEPT);
+        boolean streamEvents = accept != null && accept.contains("application/x-ndjson");
+
+        if (streamEvents) {
+            response.setStatus(HttpServletResponse.SC_OK);
+            response.setContentType("application/x-ndjson;charset=UTF-8");
+            response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache, no-store, must-revalidate");
+            PrintWriter writer = response.getWriter();
+
+            try {
+                ScanService.UploadProgressListener listener = (phase, message, fraction, written, total) -> {
+                    try {
+                        Map<String, Object> event = new LinkedHashMap<>();
+                        event.put("phase", phase);
+                        event.put("message", message);
+                        event.put("progress", fraction);
+                        event.put("written", written);
+                        event.put("total", total);
+                        writer.println(json.writeValueAsString(event));
+                        writer.flush();
+                    } catch (IOException ignored) {
+                        // client disconnected
+                    }
+                };
+
+                ScanService.Scan scan = scans.upload(id, displayName, date, notes, file.getOriginalFilename(),
+                        file.getSize(), file.getInputStream(), me, listener);
+                audit.log("scan_uploaded", me.id(), me.email(), http);
+
+                Map<String, Object> done = new LinkedHashMap<>();
+                done.put("phase", "complete");
+                done.put("message", "Upload complete!");
+                done.put("progress", 1.0);
+                done.put("scan", scan);
+                writer.println(json.writeValueAsString(done));
+                writer.flush();
+
+                return null;
+            } catch (Exception e) {
+                Map<String, Object> err = Map.of("phase", "error", "message",
+                        e.getMessage() != null ? e.getMessage() : "Upload failed");
+                writer.println(json.writeValueAsString(err));
+                writer.flush();
+
+                return null;
+            }
         }
 
         ScanService.Scan scan = scans.upload(id, displayName, date, notes, file.getOriginalFilename(),

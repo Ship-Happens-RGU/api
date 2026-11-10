@@ -18,11 +18,9 @@ import org.springframework.beans.factory.DisposableBean;
 import org.springframework.stereotype.Component;
 
 /**
- * The Iceberg table that holds every scan. One row per scan, partitioned by scan tree; the scan's
+ * The Iceberg table that holds every scan. One row per scan, partitioned by
+ * scan tree; the scan's
  * point-cloud file sits next to the table in S3 and the row points at it.
- *
- * <p>The catalog is connected lazily so the API still boots when Iceberg/LocalStack are down; scan
- * endpoints then answer 503 until it comes back.
  */
 @Component
 public class ScanCatalog implements DisposableBean {
@@ -41,7 +39,9 @@ public class ScanCatalog implements DisposableBean {
 
     public static final PartitionSpec SPEC = PartitionSpec.builderFor(SCHEMA).identity("tree_id").build();
 
-    /** Full column metrics let a delete by scan_id be resolved from manifests alone. */
+    /**
+     * Full column metrics let a delete by scan_id be resolved from manifests alone.
+     */
     private static final Map<String, String> TABLE_PROPERTIES = Map.of(
             TableProperties.FORMAT_VERSION, "2",
             TableProperties.DEFAULT_FILE_FORMAT, "avro",
@@ -59,7 +59,10 @@ public class ScanCatalog implements DisposableBean {
         this.props = props;
     }
 
-    /** A freshly loaded handle on the scans table (so every call sees the latest snapshot). */
+    /**
+     * A freshly loaded handle on the scans table (so every call sees the latest
+     * snapshot).
+     */
     public Table table() {
         try {
             RESTCatalog c = connect();
@@ -83,6 +86,15 @@ public class ScanCatalog implements DisposableBean {
         p.put(CatalogProperties.FILE_IO_IMPL, "org.apache.iceberg.aws.s3.S3FileIO");
         p.put("client.region", props.region());
         p.put("s3.path-style-access", "true");
+
+        // 10-minute socket timeout prevents Read timed out while LocalStack assembles
+        // huge multipart uploads.
+        // BC struan computer no copie :(
+        p.put("s3.multipart.part-size-bytes", "134217728");
+        p.put("http-client.apache.socket-timeout-ms", "600000");
+        p.put("http-client.urlconnection.socket-timeout-ms", "600000");
+        p.put("http-client.apache.connection-timeout-ms", "60000");
+        p.put("s3.retry.num-retries", "3");
 
         if (props.s3Endpoint() != null && !props.s3Endpoint().isBlank()) {
             p.put("s3.endpoint", props.s3Endpoint());
@@ -159,4 +171,3 @@ public class ScanCatalog implements DisposableBean {
         closeQuietly();
     }
 }
-
