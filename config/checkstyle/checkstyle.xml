@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<!--
+  House style: a blank line between blocks of code, so nothing reads cramped.
+  Same rules as ESLint's padding-line-between-statements on the frontend (web/eslint.config.js).
+  Runs with `./gradlew check` (checkstyleMain / checkstyleTest); any violation fails the build.
+-->
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+    <property name="severity" value="error"/>
+    <property name="fileExtensions" value="java"/>
+
+    <!-- Before every return, unless it's the first line of its block -->
+    <module name="RegexpMultiline">
+        <property name="id" value="blankLineBeforeReturn"/>
+        <property name="format" value=";[ \t]*\r?\n[ \t]*return\b"/>
+        <property name="message" value="Add a blank line before return"/>
+    </module>
+
+    <!-- After a block's closing brace, unless more braces, else/catch/finally or a case follow -->
+    <module name="RegexpMultiline">
+        <property name="id" value="blankLineAfterBlock"/>
+        <property name="format"
+                  value="(?m)^[ \t]*\}[ \t]*\r?\n[ \t]*(?!\}|\)|else\b|catch\b|finally\b|while\b|case\b|default\b)\S"/>
+        <property name="message" value="Add a blank line after the closing brace of a block"/>
+    </module>
+
+    <!-- After a multi-line statement ending in a block, e.g. a call taking a lambda that ends with `});` -->
+    <module name="RegexpMultiline">
+        <property name="id" value="blankLineAfterMultilineStatement"/>
+        <property name="format" value="(?m)^[ \t]*\}\)+;[ \t]*\r?\n[ \t]*(?!\}|\))\S"/>
+        <property name="message" value="Add a blank line after a multi-line statement"/>
+    </module>
+
+    <!-- Before a block statement that follows another statement -->
+    <module name="RegexpMultiline">
+        <property name="id" value="blankLineBeforeBlock"/>
+        <property name="format" value=";[ \t]*\r?\n[ \t]*(?:if|for|while|do|try|switch|synchronized)\b"/>
+        <property name="message" value="Add a blank line before the block"/>
+    </module>
+</module>
+
