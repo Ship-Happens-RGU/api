@@ -53,11 +53,12 @@ public class ScanTreeController {
 
     private final ObjectMapper json;
 
-    public ScanTreeController(ScanTreeService trees, ScanService scans, AuditService audit, ObjectMapper json) {
+
+    public ScanTreeController(ScanTreeService trees, ScanService scans, AuditService audit) {
         this.trees = trees;
         this.scans = scans;
         this.audit = audit;
-        this.json = json;
+        this.json = new ObjectMapper().findAndRegisterModules();
     }
 
     @GetMapping
@@ -67,8 +68,8 @@ public class ScanTreeController {
 
     @PostMapping
     public ResponseEntity<ScanTreeService.ScanTreeView> create(@Valid @RequestBody CreateTreeRequest req,
-                                                               @AuthenticationPrincipal AuthenticatedUser me,
-                                                               HttpServletRequest http) {
+            @AuthenticationPrincipal AuthenticatedUser me,
+            HttpServletRequest http) {
         ScanTreeService.ScanTreeView tree = trees.create(req.name(), req.description(), me);
         audit.log("scan_tree_created", me.id(), me.email(), http);
 
@@ -87,7 +88,7 @@ public class ScanTreeController {
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(@PathVariable UUID id, @AuthenticationPrincipal AuthenticatedUser me,
-                                       HttpServletRequest http) {
+            HttpServletRequest http) {
         if (!trees.delete(id)) {
             throw notFound("Scan tree not found");
         }
@@ -107,13 +108,13 @@ public class ScanTreeController {
     /** Multipart upload: the point-cloud file plus the date the scan was taken. */
     @PostMapping(path = "/{id}/scans", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<?> upload(@PathVariable UUID id,
-                                    @RequestParam("file") MultipartFile file,
-                                    @RequestParam("scanDate") String scanDate,
-                                    @RequestParam(value = "name", required = false) String name,
-                                    @RequestParam(value = "notes", required = false) String notes,
-                                    @AuthenticationPrincipal AuthenticatedUser me,
-                                    HttpServletRequest http,
-                                    HttpServletResponse response) throws IOException {
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("scanDate") String scanDate,
+            @RequestParam(value = "name", required = false) String name,
+            @RequestParam(value = "notes", required = false) String notes,
+            @AuthenticationPrincipal AuthenticatedUser me,
+            HttpServletRequest http,
+            HttpServletResponse response) throws IOException {
         requireTree(id);
 
         if (file.isEmpty()) {
@@ -149,7 +150,7 @@ public class ScanTreeController {
                         event.put("progress", fraction);
                         event.put("written", written);
                         event.put("total", total);
-                        writer.println(json.writeValueAsString(event));
+                        writer.print(json.writeValueAsString(event) + "\n");
                         writer.flush();
                     } catch (IOException ignored) {
                         // client disconnected
@@ -160,19 +161,30 @@ public class ScanTreeController {
                         file.getSize(), file.getInputStream(), me, listener);
                 audit.log("scan_uploaded", me.id(), me.email(), http);
 
+                Map<String, Object> scanData = new LinkedHashMap<>();
+                scanData.put("id", scan.id().toString());
+                scanData.put("treeId", scan.treeId().toString());
+                scanData.put("name", scan.name());
+                scanData.put("scanDate", scan.scanDate().toString());
+                scanData.put("fileName", scan.fileName());
+                scanData.put("fileSize", scan.fileSize());
+                scanData.put("notes", scan.notes());
+                scanData.put("uploadedBy", scan.uploadedBy());
+                scanData.put("uploadedAt", scan.uploadedAt().toString());
+
                 Map<String, Object> done = new LinkedHashMap<>();
                 done.put("phase", "complete");
                 done.put("message", "Upload complete!");
                 done.put("progress", 1.0);
-                done.put("scan", scan);
-                writer.println(json.writeValueAsString(done));
+                done.put("scan", scanData);
+                writer.print(json.writeValueAsString(done) + "\n");
                 writer.flush();
 
                 return null;
             } catch (Exception e) {
                 Map<String, Object> err = Map.of("phase", "error", "message",
                         e.getMessage() != null ? e.getMessage() : "Upload failed");
-                writer.println(json.writeValueAsString(err));
+                writer.print(json.writeValueAsString(err) + "\n");
                 writer.flush();
 
                 return null;
@@ -205,4 +217,3 @@ public class ScanTreeController {
         return new ResponseStatusException(HttpStatus.NOT_FOUND, message);
     }
 }
-
