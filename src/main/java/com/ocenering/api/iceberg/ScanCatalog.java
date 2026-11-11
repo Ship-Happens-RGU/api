@@ -10,6 +10,8 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
+import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.types.Types;
 import org.slf4j.Logger;
@@ -67,7 +69,7 @@ public class ScanCatalog implements DisposableBean {
         try {
             RESTCatalog c = connect();
 
-            return c.loadTable(tableId);
+            return ensureTable(c, Namespace.of(props.namespace()), tableId);
         } catch (RuntimeException e) {
             reset();
 
@@ -119,7 +121,7 @@ public class ScanCatalog implements DisposableBean {
         return c;
     }
 
-    private static void ensureTable(RESTCatalog c, Namespace ns, TableIdentifier id) {
+    private static Table ensureTable(RESTCatalog c, Namespace ns, TableIdentifier id) {
         if (!c.namespaceExists(ns)) {
             try {
                 c.createNamespace(ns);
@@ -129,23 +131,49 @@ public class ScanCatalog implements DisposableBean {
         }
 
         if (!c.tableExists(id)) {
-            try {
-                c.buildTable(id, SCHEMA)
-                        .withPartitionSpec(SPEC)
-                        .withProperties(TABLE_PROPERTIES)
-                        .create();
-                LOG.info("Created Iceberg table {}", id);
+            Table created = createTable(c, id);
 
-                return;
-            } catch (AlreadyExistsException ignored) {
-                // created concurrently
+            if (created != null) {
+                return created;
             }
         }
 
-        Table existing = c.loadTable(id);
+        Table existing;
+
+        try {
+            existing = c.loadTable(id);
+        } catch (NotFoundException | NoSuchTableException e) {
+            LOG.warn("Iceberg table {} metadata is missing in S3 ({}); dropping stale catalog entry and recreating",
+                    id, e.getMessage());
+            c.dropTable(id, false);
+            Table recreated = createTable(c, id);
+
+            if (recreated != null) {
+                return recreated;
+            }
+
+            existing = c.loadTable(id);
+        }
 
         if (!"full".equals(existing.properties().get(TableProperties.DEFAULT_WRITE_METRICS_MODE))) {
             existing.updateProperties().set(TableProperties.DEFAULT_WRITE_METRICS_MODE, "full").commit();
+        }
+
+        return existing;
+    }
+
+    private static Table createTable(RESTCatalog c, TableIdentifier id) {
+        try {
+            Table table = c.buildTable(id, SCHEMA)
+                    .withPartitionSpec(SPEC)
+                    .withProperties(TABLE_PROPERTIES)
+                    .create();
+            LOG.info("Created Iceberg table {}", id);
+
+            return table;
+        } catch (AlreadyExistsException ignored) {
+            // created concurrently
+            return null;
         }
     }
 
