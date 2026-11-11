@@ -69,11 +69,19 @@ public class ScanCatalog implements DisposableBean {
         try {
             RESTCatalog c = connect();
 
-            return ensureTable(c, Namespace.of(props.namespace()), tableId);
+            return loadOrCreateTable(c, Namespace.of(props.namespace()), tableId);
         } catch (RuntimeException e) {
             reset();
 
             throw new ScanStorageException("Scan storage (Iceberg) is unavailable: " + e.getMessage(), e);
+        }
+    }
+
+    private static Table loadOrCreateTable(RESTCatalog c, Namespace ns, TableIdentifier id) {
+        try {
+            return c.loadTable(id);
+        } catch (NotFoundException | NoSuchTableException e) {
+            return ensureTable(c, ns, id);
         }
     }
 

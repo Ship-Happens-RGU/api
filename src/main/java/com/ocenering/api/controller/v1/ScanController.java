@@ -10,6 +10,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -44,9 +45,11 @@ public class ScanController {
     @GetMapping("/{scanId}/file")
     public void download(@PathVariable UUID scanId, HttpServletRequest request, HttpServletResponse response)
             throws IOException {
-        ScanService.Scan scan = scans.find(scanId).orElseThrow(() -> ScanTreeController.notFound("Scan not found"));
-        InputFile file = scans.openFile(scanId).orElseThrow(() -> ScanTreeController.notFound("Scan not found"));
-        long totalLength = file.getLength();
+        ScanService.DownloadableScan dl = scans.openDownload(scanId)
+                .orElseThrow(() -> ScanTreeController.notFound("Scan not found"));
+        ScanService.Scan scan = dl.scan();
+        InputFile file = dl.file();
+        long totalLength = scan.fileSize() > 0 ? scan.fileSize() : file.getLength();
 
         response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
         response.setHeader(HttpHeaders.ACCEPT_RANGES, "bytes");
@@ -101,20 +104,35 @@ public class ScanController {
             response.setContentLengthLong(contentLength);
 
             try (SeekableInputStream in = file.newStream(); OutputStream out = response.getOutputStream()) {
-                in.seek(start);
-                byte[] buffer = new byte[65536];
-                long remaining = contentLength;
+                if (in instanceof RangeReadable rr) {
+                    int chunkSize = (int) Math.min(contentLength, 8L * 1024 * 1024);
+                    byte[] buffer = new byte[chunkSize];
+                    long pos = start;
+                    long remaining = contentLength;
 
-                while (remaining > 0) {
-                    int toRead = (int) Math.min(buffer.length, remaining);
-                    int read = in.read(buffer, 0, toRead);
-
-                    if (read < 0) {
-                        break;
+                    while (remaining > 0) {
+                        int toRead = (int) Math.min(buffer.length, remaining);
+                        rr.readFully(pos, buffer, 0, toRead);
+                        out.write(buffer, 0, toRead);
+                        pos += toRead;
+                        remaining -= toRead;
                     }
+                } else {
+                    in.seek(start);
+                    byte[] buffer = new byte[65536];
+                    long remaining = contentLength;
 
-                    out.write(buffer, 0, read);
-                    remaining -= read;
+                    while (remaining > 0) {
+                        int toRead = (int) Math.min(buffer.length, remaining);
+                        int read = in.read(buffer, 0, toRead);
+
+                        if (read < 0) {
+                            break;
+                        }
+
+                        out.write(buffer, 0, read);
+                        remaining -= read;
+                    }
                 }
             }
 

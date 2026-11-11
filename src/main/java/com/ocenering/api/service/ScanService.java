@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionKey;
 import org.apache.iceberg.Table;
@@ -27,6 +28,7 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.DataWriter;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.PositionOutputStream;
@@ -55,6 +57,10 @@ public class ScanService {
     public record TreeStats(int scanCount, OffsetDateTime firstScanDate, OffsetDateTime lastScanDate) {
     }
 
+    /** Metadata and S3 input handle for streaming a scan without redundant catalog lookups. */
+    public record DownloadableScan(Scan scan, InputFile file) {
+    }
+
     @FunctionalInterface
     public interface UploadProgressListener {
         void onProgress(String phase, String message, double fraction, long writtenBytes, long totalBytes);
@@ -64,6 +70,10 @@ public class ScanService {
     }
 
     private final ScanCatalog scanCatalog;
+
+    private final Map<UUID, StoredScan> scanCache = new ConcurrentHashMap<>();
+
+    private volatile FileIO cachedIo;
 
     public ScanService(ScanCatalog scanCatalog) {
         this.scanCatalog = scanCatalog;
@@ -99,6 +109,12 @@ public class ScanService {
     }
 
     public Optional<Scan> find(UUID scanId) {
+        StoredScan cached = scanCache.get(scanId);
+
+        if (cached != null) {
+            return Optional.of(cached.scan());
+        }
+
         return findStored(scanCatalog.table(), scanId).map(StoredScan::scan);
     }
 
@@ -116,6 +132,7 @@ public class ScanService {
         }
 
         Table table = scanCatalog.table();
+        cachedIo = table.io();
         UUID scanId = UUID.randomUUID();
         String fileName = sanitizeFileName(originalFileName);
         String location = trimSlash(table.location()) + "/files/" + treeId + "/" + scanId + "/" + fileName;
@@ -146,6 +163,8 @@ public class ScanService {
             throw new ScanStorageException("Committing the scan to Iceberg failed: " + e.getMessage(), e);
         }
 
+        scanCache.put(scanId, new StoredScan(scan, location));
+
         if (listener != null) {
             listener.onProgress("complete", "Upload complete!", 1.0, written, written);
         }
@@ -155,9 +174,37 @@ public class ScanService {
 
     /** Opens the stored point-cloud file for streaming back to the client. */
     public Optional<InputFile> openFile(UUID scanId) {
-        Table table = scanCatalog.table();
+        return openDownload(scanId).map(DownloadableScan::file);
+    }
 
-        return findStored(table, scanId).map(s -> table.io().newInputFile(s.location()));
+    /**
+     * Resolves both the scan metadata and S3 InputFile using an in-memory cache so HTTP Range
+     * requests do not repeatedly scan Iceberg manifests or issue S3 HeadObject calls.
+     */
+    public Optional<DownloadableScan> openDownload(UUID scanId) {
+        StoredScan stored = scanCache.get(scanId);
+        FileIO io = cachedIo;
+
+        if (stored == null || io == null) {
+            Table table = scanCatalog.table();
+            io = table.io();
+            cachedIo = io;
+
+            if (stored == null) {
+                stored = findStored(table, scanId).orElse(null);
+            }
+        }
+
+        if (stored == null) {
+            return Optional.empty();
+        }
+
+        long fileSize = stored.scan().fileSize();
+        InputFile inputFile = fileSize > 0
+                ? io.newInputFile(stored.location(), fileSize)
+                : io.newInputFile(stored.location());
+
+        return Optional.of(new DownloadableScan(stored.scan(), inputFile));
     }
 
     public boolean delete(UUID scanId) {
@@ -169,6 +216,7 @@ public class ScanService {
         }
 
         table.newDelete().deleteFromRowFilter(Expressions.equal("scan_id", scanId.toString())).commit();
+        scanCache.remove(scanId);
         deleteQuietly(table, stored.get().location());
 
         return true;
@@ -186,6 +234,7 @@ public class ScanService {
         table.newDelete().deleteFromRowFilter(Expressions.equal("tree_id", treeId.toString())).commit();
 
         for (StoredScan s : stored) {
+            scanCache.remove(s.scan().id());
             deleteQuietly(table, s.location());
         }
     }
@@ -196,12 +245,15 @@ public class ScanService {
                 .findFirst();
     }
 
-    private static List<StoredScan> read(Table table, Expression filter) {
+    private List<StoredScan> read(Table table, Expression filter) {
+        cachedIo = table.io();
         List<StoredScan> out = new ArrayList<>();
 
         try (CloseableIterable<Record> rows = IcebergGenerics.read(table).where(filter).build()) {
             for (Record r : rows) {
-                out.add(fromRecord(r));
+                StoredScan stored = fromRecord(r);
+                scanCache.put(stored.scan().id(), stored);
+                out.add(stored);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
