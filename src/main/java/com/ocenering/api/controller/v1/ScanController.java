@@ -2,26 +2,34 @@ package com.ocenering.api.controller.v1;
 
 import com.ocenering.api.auth.AuditService;
 import com.ocenering.api.auth.AuthenticatedUser;
+import com.ocenering.api.iceberg.ScanStorageException;
+import com.ocenering.api.service.ScanModelService;
 import com.ocenering.api.service.ScanService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.UUID;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/v1/scans")
@@ -29,10 +37,13 @@ public class ScanController {
 
     private final ScanService scans;
 
+    private final ScanModelService models;
+
     private final AuditService audit;
 
-    public ScanController(ScanService scans, AuditService audit) {
+    public ScanController(ScanService scans, ScanModelService models, AuditService audit) {
         this.scans = scans;
+        this.models = models;
         this.audit = audit;
     }
 
@@ -144,6 +155,67 @@ public class ScanController {
         try (SeekableInputStream in = file.newStream(); OutputStream out = response.getOutputStream()) {
             in.transferTo(out);
         }
+    }
+
+    /** Stores the GLB mesh the browser converted from this scan's point cloud (replacing any earlier one). */
+    @PostMapping(path = "/{scanId}/model", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ScanModelService.ModelInfo> uploadModel(@PathVariable UUID scanId,
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "vertexCount", required = false) Long vertexCount,
+            @RequestParam(value = "triangleCount", required = false) Long triangleCount,
+            @RequestParam(value = "voxelCm", required = false) Double voxelCm,
+            @AuthenticationPrincipal AuthenticatedUser me,
+            HttpServletRequest http) throws IOException {
+        ScanService.Scan scan = scans.find(scanId).orElseThrow(() -> ScanTreeController.notFound("Scan not found"));
+
+        if (file.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The model file is empty");
+        }
+
+        ScanModelService.ModelInfo info;
+
+        try {
+            info = models.store(scanId, scan.treeId(), file.getInputStream(),
+                    new ScanModelService.ModelStats(vertexCount, triangleCount, voxelCm), me.email());
+        } catch (ScanStorageException e) {
+            if (e.getCause() instanceof IllegalArgumentException bad) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, bad.getMessage());
+            }
+
+            throw e;
+        }
+
+        audit.log("scan_model_uploaded", me.id(), me.email(), http);
+
+        return ResponseEntity.status(HttpStatus.CREATED).body(info);
+    }
+
+    /** Streams the scan's GLB model. 404 when the scan has not been converted yet. */
+    @GetMapping("/{scanId}/model")
+    public void downloadModel(@PathVariable UUID scanId, HttpServletResponse response) throws IOException {
+        Map.Entry<ScanModelService.ModelInfo, InputFile> model = models.open(scanId)
+                .orElseThrow(() -> ScanTreeController.notFound("This scan has no model yet"));
+
+        response.setContentType("model/gltf-binary");
+        response.setContentLengthLong(model.getKey().fileSize());
+        response.setHeader(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
+                .filename(scanId + ".glb", StandardCharsets.UTF_8)
+                .build()
+                .toString());
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "private, no-cache");
+
+        try (SeekableInputStream in = model.getValue().newStream(); OutputStream out = response.getOutputStream()) {
+            in.transferTo(out);
+        }
+    }
+
+    @DeleteMapping("/{scanId}/model")
+    public ResponseEntity<Void> deleteModel(@PathVariable UUID scanId) {
+        if (!models.delete(scanId)) {
+            throw ScanTreeController.notFound("This scan has no model");
+        }
+
+        return ResponseEntity.noContent().build();
     }
 
     @DeleteMapping("/{scanId}")

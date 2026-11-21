@@ -50,7 +50,12 @@ public class ScanService {
             long fileSize,
             String notes,
             String uploadedBy,
-            OffsetDateTime uploadedAt) {
+            OffsetDateTime uploadedAt,
+            ScanModelService.ModelInfo model) {
+
+        Scan withModel(ScanModelService.ModelInfo m) {
+            return new Scan(id, treeId, name, scanDate, fileName, fileSize, notes, uploadedBy, uploadedAt, m);
+        }
     }
 
     /** Per-tree aggregates for the folder list. */
@@ -73,10 +78,13 @@ public class ScanService {
 
     private final Map<UUID, StoredScan> scanCache = new ConcurrentHashMap<>();
 
+    private final ScanModelService scanModels;
+
     private volatile FileIO cachedIo;
 
-    public ScanService(ScanCatalog scanCatalog) {
+    public ScanService(ScanCatalog scanCatalog, ScanModelService scanModels) {
         this.scanCatalog = scanCatalog;
+        this.scanModels = scanModels;
     }
 
     /** All scans of a tree, oldest scan date first (timeline order). */
@@ -90,6 +98,9 @@ public class ScanService {
         }
 
         out.sort(Comparator.comparing(Scan::scanDate).thenComparing(Scan::uploadedAt));
+
+        Map<UUID, ScanModelService.ModelInfo> models = scanModels.infoFor(out.stream().map(Scan::id).toList());
+        out.replaceAll(s -> s.withModel(models.get(s.id())));
 
         return out;
     }
@@ -111,11 +122,11 @@ public class ScanService {
     public Optional<Scan> find(UUID scanId) {
         StoredScan cached = scanCache.get(scanId);
 
-        if (cached != null) {
-            return Optional.of(cached.scan());
-        }
+        Optional<Scan> scan = cached != null
+                ? Optional.of(cached.scan())
+                : findStored(scanCatalog.table(), scanId).map(StoredScan::scan);
 
-        return findStored(scanCatalog.table(), scanId).map(StoredScan::scan);
+        return scan.map(s -> s.withModel(scanModels.info(scanId).orElse(null)));
     }
 
     /** Streams the scan's raw file to S3, then commits its row. The file is removed if the commit fails. */
@@ -153,7 +164,7 @@ public class ScanService {
 
         Scan scan = new Scan(scanId, treeId, name, scanDate.withOffsetSameInstant(ZoneOffset.UTC), fileName,
                 written > 0 ? written : size, blankToNull(notes), me != null ? me.email() : null,
-                OffsetDateTime.now(ZoneOffset.UTC));
+                OffsetDateTime.now(ZoneOffset.UTC), null);
 
         try {
             appendRow(table, toRecord(table, scan, location));
@@ -218,12 +229,14 @@ public class ScanService {
         table.newDelete().deleteFromRowFilter(Expressions.equal("scan_id", scanId.toString())).commit();
         scanCache.remove(scanId);
         deleteQuietly(table, stored.get().location());
+        scanModels.delete(scanId);
 
         return true;
     }
 
     /** Removes every scan in a tree (a whole partition) and their files. */
     public void deleteTree(UUID treeId) {
+        scanModels.deleteTree(treeId);
         Table table = scanCatalog.table();
         List<StoredScan> stored = read(table, Expressions.equal("tree_id", treeId.toString()));
 
@@ -337,7 +350,8 @@ public class ScanService {
                 ((Number) r.getField("file_size")).longValue(),
                 str(r.getField("notes")),
                 str(r.getField("uploaded_by")),
-                (OffsetDateTime) r.getField("uploaded_at"));
+                (OffsetDateTime) r.getField("uploaded_at"),
+                null);
 
         return new StoredScan(scan, str(r.getField("file_location")));
     }

@@ -171,6 +171,7 @@ public class ScanTreeController {
                 scanData.put("notes", scan.notes());
                 scanData.put("uploadedBy", scan.uploadedBy());
                 scanData.put("uploadedAt", scan.uploadedAt().toString());
+                scanData.put("model", null);
 
                 Map<String, Object> done = new LinkedHashMap<>();
                 done.put("phase", "complete");
