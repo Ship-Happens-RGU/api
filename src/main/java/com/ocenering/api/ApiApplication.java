@@ -13,6 +13,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 public class ApiApplication {
 
     public static void main(String[] args) {
+        JavaRuntimeGuard.check();
+
         SpringApplication.run(ApiApplication.class, args);
     }
 }

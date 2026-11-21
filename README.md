@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Java 27
+- Java 27.0.1.1 or later. Older Java 27 builds are affected by Java4Shell (CVE-2026-114938), and the build and the API both refuse to run on them. Check with `java -version`.
 - Docker (for Postgres, Spark, MinIO / LocalStack via `compose.yaml`)
 
 ## Run

@@ -14,6 +14,16 @@ java {
 	}
 }
 
+// Java4Shell (CVE-2026-114938): a malformed Base64 string can corrupt memory in the JDK's own Base64
+// decoder and lead to remote code execution. Fixed in Java 27.0.1.1, so refuse to build on anything older.
+def minimumSafeJava = Runtime.Version.parse('27.0.1.1')
+def toolchainJava = javaToolchains.launcherFor(java.toolchain).get().metadata.javaRuntimeVersion
+
+if (Runtime.Version.parse(toolchainJava).compareToIgnoreOptional(minimumSafeJava) < 0) {
+	throw new GradleException("Java ${toolchainJava} is affected by Java4Shell (CVE-2026-114938). " +
+		"Install Java ${minimumSafeJava} or later and try again.")
+}
+
 ext {
 	icebergVersion = '1.10.0'
 }
